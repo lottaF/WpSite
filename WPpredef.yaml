@@ -1,0 +1,328 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description:  Sets up an EFS and an RDS for the wordpress site.
+#              Uses an installer EC2 to install and configure the wordpress solution. 
+#              Sets up the framework required to provide the WP site service, in terms of Launch template for WP servers,
+#              TG, ASG and ALB.
+#
+# notes regarding intrisic functions used:  (to make sure I don't loose them)
+#   !Xx id´s the short form of Fn::Xx
+#   !Ref      - Returns the value of the specified parameter or resource. 
+#   !Sub      - Substitutes variables in an input string with values that you specify.
+#   !Join     - Appends a set of values into a single value, separated by the specified delimiter.
+#               Format:  !Join [ delimiter, [ comma-delimited list of values ] ]
+#   !GetAZs   - Returns an array that lists Availability Zones for a specified region in alphabetical order.
+#   !Select   - Returns a single object from a list of objects by index.
+#   !GetAtt  - Returns the value of an attribute from a resource in the template. 
+#               Format: !GetAtt logicalNameOfResource.attributeName
+
+
+Parameters:
+  MyVpc:
+    Description: The virtual private cloud to operate in
+    Type: String
+    Default: "vpc-b39a45ca"
+
+  MyPubSubn1:
+    Description: The 1st public subnet
+    Type: String
+    Default: "subnet-25f8f143"
+
+  MyPubSubn2:
+    Description: The 2nd public subnet
+    Type: String
+    Default: "subnet-91051dd9"
+
+  DevEnvCIDR:
+    Description: The IP range of the development environments with allowed tcp/ssh access. In CIDR notation.
+    Type: String
+    Default: 0.0.0.0/0
+#    Default: 172.31.16.22/32
+
+  WpMasterUser:
+    Description: The wordpress master user for initial logon
+    Type: String
+    Default: "admin"
+
+  WpMasterPw:
+    Description: The wordpress master user for initial logon
+    Type: String
+    Default: "loTTards"
+
+  WpUser:
+    Description: The wordpress server user for initial logon
+    Type: String
+    Default: "wpLotta"
+
+  WpPw:
+    Description: The wordpress server user for initial logon
+    Type: String
+    Default: "loTTaWp123"
+
+Resources:
+
+#------------------------- D A T A   B A S E    R E S O U R C E S -------------------------------
+
+  FrEndDbSecGrp:
+    Description: A security group for db access. 
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: DB frontend access
+      GroupName: !Sub "DBfrontAccess-${AWS::StackName}"
+      VpcId: !Ref MyVpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '3306'
+        ToPort: '3306'
+        SourceSecurityGroupId: !GetAtt WebServSecGrp.GroupId
+#        SourceSecurityGroupName: !Ref WebServSecGrp
+
+  MyDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: '20'         # MariaDB range 20-65536
+      DBInstanceClass: db.t2.micro   # Free Tier
+      Engine: MariaDB                # byt till mariadb
+#    EngineVersion 10.2
+      MasterUsername: !Ref WpMasterUser
+      MasterUserPassword: !Ref WpMasterPw
+      BackupRetentionPeriod: 0       # 0 to disable backup
+#      DBName: !Sub "db${AWS::StackName}"
+      DBName: !Sub "wordpress"
+      MultiAZ: true
+      DBSubnetGroupName: !Ref MyDBSubnGrp
+      VPCSecurityGroups:             # The recommended attribute to set sec groups for rds
+      - !GetAtt FrEndDbSecGrp.GroupId
+
+  MyDBSubnGrp: 
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties: 
+      DBSubnetGroupDescription: DB subnet for WP users
+      DBSubnetGroupName: !Sub "WordPressSubNet-${AWS::StackName}"
+      SubnetIds: 
+      - !Ref MyPubSubn1
+      - !Ref MyPubSubn2
+      Tags: 
+      - Key: Name
+        Value: "Subnets for DB instances"
+
+
+#------------------------- S H A R E D    F I L E      S Y S T E M    R E S O U R C E S --------------
+
+  EfsSystem:
+    Type: 'AWS::EFS::FileSystem'
+    Properties:
+      BackupPolicy:
+        Status: DISABLED 
+      PerformanceMode: generalPurpose
+      Encrypted: true
+      LifecyclePolicies:
+        - TransitionToIA: AFTER_30_DAYS
+      FileSystemTags:
+        - Key: "Name"
+          Value: "AnnsEfs"
+
+  EfsBaseSecGrp:
+    Description: A security group for the EFS storage. 
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: !Sub "Base NFS access in ${MyVpc} (tcp via port 2049)"
+      GroupName: !Join [ -, [ 'EfsBaseSecGrp', !Ref 'AWS::StackName' ]]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '2049'
+          ToPort: '2049'
+          CidrIp: 0.0.0.0/0 
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: "Name"
+          Value: "EFS access base group"
+
+  EfsLimSecGrp:
+    Description: A security group for the EFS storage. 
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: "Enable limited NFS access in ${MyVPC} (tcp via port 2049)"
+      GroupName: !Join [ -, [ 'EfsLimSecGrp', !Ref 'AWS::StackName' ]]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '2049'
+          ToPort: '2049'
+          SourceSecurityGroupId: !GetAtt EfsBaseSecGrp.GroupId
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: "Name"
+          Value: "EFS access base group"
+
+  MntTarg1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsSystem
+      SubnetId: !Ref MyPubSubn1
+      SecurityGroups:
+        - !Ref EfsLimSecGrp
+
+  MntTarg2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref EfsSystem
+      SubnetId: !Ref MyPubSubn2
+      SecurityGroups:
+        - !Ref EfsLimSecGrp
+
+
+#------------------------- A P P L I C A T I O N    R E S O U R C E S --------------
+
+  WebServSecGrp:  # When combine reference all the actual sec groups the webservers need
+    Description: A security group for webserver access. 
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: "Webserver access"
+      GroupName: !Sub "WebServAcces-${AWS::StackName}"
+      VpcId: !Ref MyVpc
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: 0.0.0.0/0
+      Tags:
+      - Key: "Name"
+        Value: "Webserver access"
+
+  Mounter1: 
+    Type: AWS::EC2::Instance
+    DependsOn: MyDB
+    Properties: 
+      ImageId: 'ami-096f43ef67d75e998'
+      InstanceType: t2.micro
+      UserData: 
+        Fn::Base64:
+          !Sub
+          - |
+            #!/bin/bash -x
+            yum update -y
+            yum install amazon-efs-utils -y
+            mkdir -p /var/www
+            # -- efterson db tar lång tid att komma upp sleep 120
+            echo "${EfsSystem}:/ /var/www efs _netdev,tls 0 0" | tee -a /etc/fstab
+            mount -a
+            mkdir /home/ec2-user/efsMounted-1
+            #--- install, start and persist the Apache web server
+            yum update -y
+            yum install -y httpd
+            systemctl start httpd
+            systemctl enable httpd
+            mkdir /home/ec2-user/ApacheStarted
+            #--- setup the wordpress initial data only from one server
+            #--- ladda ned konifurationsfiler, modifiera för siten och lägg på plats
+            mkdir /home/ec2-user/atPointOfWget-2
+            cd /home/ec2-user
+            wget https://wordpress.org/latest.tar.gz
+            mkdir /home/ec2-user/afterWget-3
+            tar -xzf latest.tar.gz
+            cd wordpress
+            cp wp-config-sample.php wp-config.php
+            # MYIP=$(hostname -i)
+            sed -i -e "s/database_name_here/wordpress/;s/username_here/${WpUser}/;s/password_here/${WpPw}/;s/localhost/${DbEndPoint}/" wp-config.php
+            # sed -i -e "s/database_name_here/wordpress/;s/username_here/lotta/;s/password_here/loTTa123/" wp-config.php
+            mkdir /home/ec2-user/wpConfigFileModified-4
+            # here should also replace the security key
+            #--- skapa en användare åt wordpress i databasen - GRANT ALL tillåts inte så plockat isär --
+            mkdir /home/ec2-user/atPointOfCreatingWpDbUser-5
+            yum install -y mariadb
+            sleep(120)
+            MYSQL_HOST=${DbEndPoint}
+            Q1="CREATE USER '${WpUser}' IDENTIFIED BY '${WpPw}';"
+            Q2="GRANT SELECT,INSERT,DELETE,CREATE,UPDATE,ALTER ON wordpress.* TO '${WpUser}';"
+            Q3="FLUSH PRIVILEGES;"
+            SQLOP="$Q1$Q2$Q3"
+            echo "$SQLOP" >  /home/ec2-user/sqlstring.txt
+            echo "${DbEndPoint}" >  /home/ec2-user/dbendpoint.tx
+            mkdir /home/ec2-user/priorToDbOp-6
+            mysql --host="${DbEndPoint}" --user="${WpMasterUser}" --password="${WpMasterPw}" -e $SQLOP
+            mkdir /home/ec2-user/atPointOfDeployingWP-7
+            # deploy
+            amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+            cd /home/ec2-user
+            cp -r wordpress/* /var/www/html/
+            #--- make sure user can fully access files in directory
+            usermod -a -G apache ec2-user
+            chown -R ec2-user:apache /var/www
+            chmod 2775 /var/www && find /var/www -type d -exec chmod 2775 {} \;
+            systemctl restart httpd
+            mkdir /home/ec2-user/madeItToTheEnd-8
+            #---cleanup installation files
+          - DbEndPoint: !GetAtt MyDB.Endpoint.Address
+      Tags:
+        - Key: "Name"
+          Value: !Sub "Mounter of efs ${EfsSystem}"
+      SubnetId: !Ref MyPubSubn1
+      KeyName: My3rdKey
+      SecurityGroupIds:
+        - !GetAtt WebServSecGrp.GroupId
+        - !GetAtt EfsBaseSecGrp.GroupId
+
+  Mounter2: 
+    Type: AWS::EC2::Instance
+    DependsOn: Mounter1
+    Properties: 
+      ImageId: 'ami-096f43ef67d75e998'
+      InstanceType: t2.micro
+      UserData: 
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash -x
+            yum update -y
+            yum install amazon-efs-utils -y
+            mkdir -p /var/www
+            echo "${EfsSystem}:/ /var/www efs _netdev,tls 0 0" | tee -a /etc/fstab
+            mount -a
+            #--- add lamp stack
+            yum update -y
+            amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+            yum install -y httpd mariadb-server
+            systemctl start httpd
+            systemctl enable httpd
+      Tags:
+        - Key: "Name"
+          Value: !Sub "Mounter 2 of efs ${EfsSystem}"
+      SubnetId: !Ref MyPubSubn2
+      KeyName: My3rdKey
+      SecurityGroupIds:
+        - !GetAtt WebServSecGrp.GroupId
+        - !GetAtt EfsBaseSecGrp.GroupId
+
+Outputs:
+
+  EFS:
+    Description: A reference to the filesystem
+    Value: !Ref EfsSystem
+
+  MntTrg1:
+    Description: A reference to the EFS mount target of AZ1
+    Value: !Ref MntTarg1
+
+  MntTrg2:
+    Description: A reference to the EFS mount target of AZ2
+    Value: !Ref MntTarg2
+
+  EFSbaseSecurityGroup:
+    Description: A reference to the base EFS security group for EFS users
+    Value: !Ref EfsBaseSecGrp
+
+  EFSlimitedSecurityGroup:
+    Description: A reference to the limited EFS security group for EFS self
+    Value: !Ref EfsLimSecGrp
+
+  RDS:
+    Description: A reference to the Database
+    Value: !Ref MyDB
+
+  RDSDBSUBNGRP:
+    Description: A reference to the Database Subnet Group
+    Value: !Ref MyDBSubnGrp
