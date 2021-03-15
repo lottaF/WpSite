@@ -1,8 +1,10 @@
 ---
 AWSTemplateFormatVersion: '2010-09-09'
 
-Description:  Sets up a VPC, with two public and two private subnets realized in two availability
-  zones. An internet gateway is setup, with a default route on the public subnets. Two NAT gateways 
+Description:  Sets up a VPC, with two public subnets realized in separate availability
+  zones. An internet gateway is setup, with a default route on the public subnets.
+  
+  Two NAT gateways 
   are setup; one in each availability zone. Default routes for these are defined in the in the 
   private subnets.
   
@@ -42,16 +44,6 @@ Parameters:
     Description: The IP range of the public subnet in the second availability zone
     Type: String
     Default: 10.192.11.0/24
-
-  PrivSubn1CIDR:
-    Description: The IP range of the private subnet in the first availability zone
-    Type: String
-    Default: 10.192.20.0/24
-
-  PrivSubn2CIDR:
-    Description: The IP range of the private subnet in the second availability zone
-    Type: String
-    Default: 10.192.21.0/24
 
 Resources:
   theVPC:
@@ -103,30 +95,6 @@ Resources:
       Tags:
         - Key: Name
           Value: !Sub "${Environment} public subnet (AZ2)"
-
-  PrivSubn1:
-    Description: The private subnet in availability zone 1. 
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref theVPC
-      AvailabilityZone: !Select [ 0, !GetAZs  '' ]
-      CidrBlock: !Ref PrivSubn1CIDR
-      MapPublicIpOnLaunch: false  # Make private.
-      Tags:
-        - Key: Name
-          Value: !Sub "${Environment} private subnet (AZ1)"
-
-  PrivSubn2:
-    Description:  The private subnet in availability zone 2. 
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref theVPC
-      AvailabilityZone: !Select [ 1, !GetAZs  '' ]
-      CidrBlock: !Ref PrivSubn2CIDR
-      MapPublicIpOnLaunch: false   # Make private.
-      Tags:
-        - Key: Name
-          Value: !Sub "${Environment} private subnet (AZ2)"
 
   NatGateway1EIP:
     Description: Specify a first Elastic IP address and associate it with the VPC GW.
@@ -191,70 +159,11 @@ Resources:
       RouteTableId: !Ref PubRteTab
       SubnetId: !Ref PubSubn2
 
-  PrivRteTab1:
-    Description: Specify a private route table for a the VPC in avalability zone 1. 
-                 >> After this add routes and associate the table with the subnetwork.
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref theVPC
-      Tags:
-        - Key: Name
-          Value: !Sub "${Environment} private routes (AZ1)"
-
-  DefaultPrivRte1:
-    Description: Specify a route in the private route table in availability zone 1. Set the NAT gateway of public subnet in availability zone 1.
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivRteTab1
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway1
-
-  PrivSubn1RteTabAss:
-    Description: Associate the private route table in availability zone 1 with the private subnetwork in avalability zone 1.
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivRteTab1
-      SubnetId: !Ref PrivSubn1
-
-  PrivRteTab2:
-    Description: Specify a private route table for a the VPC in avalability zone 2. 
-                 >> After this add routes and associate the table with the subnetwork.
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref theVPC
-      Tags:
-        - Key: Name
-          Value: !Sub "${Environment} private routes (AZ2)"
-
-  DefaultPrivRte2:
-    Description: Specify a route in the private route table in availability zone 2. 
-                 Set the NAT gateway of public subnet in availability zone 2.
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId: !Ref PrivRteTab2
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId: !Ref NatGateway2
-
-  PrivSubn2RteTabAss:
-    Description: Associate the private route table in availability zone 2 with the private subnetwork in avalability zone 2.
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PrivRteTab2
-      SubnetId: !Ref PrivSubn2
-
 Outputs:
 
   VPC:
     Description: A reference to the created VPC
     Value: !Ref theVPC
-
-  PrivSubn1:
-    Description: A reference to the private subnet in the 1st Availability Zone
-    Value: !Ref PrivSubn1
-
-  PrivSubn2:
-    Description: A reference to the private subnet in the 2nd Availability Zone
-    Value: !Ref PrivSubn2  
 
   PubSubn1:
     Description: A reference to the public subnet in the 1st Availability Zone
@@ -263,10 +172,6 @@ Outputs:
   PubSubn2:
     Description: A reference to the public subnet in the 2nd Availability Zone
     Value: !Ref PubSubn2
-
-  PrivateSubnets:
-    Description: A list of the private subnets
-    Value: !Join [ ",", [ !Ref PrivSubn1, !Ref PrivSubn2 ]]
 
   PublicSubnets:
     Description: A list of the public subnets

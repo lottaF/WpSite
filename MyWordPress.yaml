@@ -60,6 +60,11 @@ Parameters:
     Type: String
     Default: "loTTaWp123"
 
+  KeyPairKey:
+    Description: The key to use for Webservers and Installer server.
+    Type: String
+    Default: MyBestKey
+
 Resources:
 
 #------------------------- D A T A   B A S E    R E S O U R C E S -------------------------------
@@ -75,8 +80,7 @@ Resources:
       - IpProtocol: tcp
         FromPort: '3306'
         ToPort: '3306'
-        SourceSecurityGroupId: !GetAtt WebServSecGrp.GroupId
-#        SourceSecurityGroupName: !Ref WebServSecGrp
+        SourceSecurityGroupId: !GetAtt WebAppSecGrp.GroupId
 
   MyDB:
     Type: AWS::RDS::DBInstance
@@ -88,8 +92,7 @@ Resources:
       MasterUsername: !Ref WpMasterUser
       MasterUserPassword: !Ref WpMasterPw
       BackupRetentionPeriod: 0       # 0 to disable backup
-#      DBName: !Sub "db${AWS::StackName}"
-      DBName: !Sub "wordpress"
+      DBName: "wordpress"
       MultiAZ: true
       DBSubnetGroupName: !Ref MyDBSubnGrp
       VPCSecurityGroups:             # The recommended attribute to set sec groups for rds
@@ -174,27 +177,120 @@ Resources:
 
 #------------------------- A P P L I C A T I O N    R E S O U R C E S --------------
 
-  WebServSecGrp:  # When combine reference all the actual sec groups the webservers need
-    Description: A security group for webserver access. 
+  DevSecGrp:  
+    Description: A security group for developers access. 
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
-      GroupDescription: "Webserver access"
-      GroupName: !Sub "WebServAcces-${AWS::StackName}"
+      GroupDescription: "Developers access"
+      GroupName: !Sub "DevAcces-${AWS::StackName}"
       VpcId: !Ref MyVpc
       SecurityGroupIngress:
       - IpProtocol: tcp
         FromPort: '22'
         ToPort: '22'
         CidrIp: 0.0.0.0/0
-      - IpProtocol: tcp
-        FromPort: '80'
-        ToPort: '80'
-        CidrIp: 0.0.0.0/0
       Tags:
       - Key: "Name"
         Value: "Webserver access"
 
-  Mounter1: 
+  WebSecGrp:
+    Description: A security group web access. 
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable open HTTP and HTTPS access
+      GroupName: !Sub "WebAcces-${AWS::StackName}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          CidrIp: 0.0.0.0/0   # from anywhere
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: "Name"
+          Value: "WebSecGrp"
+
+  WebAppSecGrp:
+    Description: A security group for forwarded web access. 
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Enable forwarded web access.
+      GroupName: !Sub "WebAppAcces-${AWS::StackName}"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: '80'
+          ToPort: '80'
+          SourceSecurityGroupId: !GetAtt WebSecGrp.GroupId
+      VpcId: !Ref MyVpc
+      Tags:
+        - Key: "Name"
+          Value: "WebAppSecGrp"
+
+  AnnsASG:
+    Description: An ASG that launches the webservers with 'AnnsLaunchTemplate'and connects to 'AnnsTargetGroup'
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      AutoScalingGroupName: !Sub "AnnsASG-${AWS::StackName}"
+      MinSize: "1"
+      MaxSize: "3"
+      DesiredCapacity: "2"
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AnnsLaunchTemplate
+        Version: !GetAtt AnnsLaunchTemplate.LatestVersionNumber
+      Tags:
+        - Key: "Name"
+          Value: "WordPressServer"
+          PropagateAtLaunch: true
+      VPCZoneIdentifier:
+        - !Ref MyPubSubn1
+        - !Ref MyPubSubn2
+      TargetGroupARNs:
+        - !Ref AnnsTargetGroup
+
+  AnnsTargetGroup:
+    Description: A target group in this VPC for the autoscaled webservers.
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties:
+      Port: 80
+      Protocol: "HTTP"
+      HealthCheckPort: "traffic-port"
+      HealthCheckProtocol: "HTTP"
+      TargetType: "instance"
+      Matcher: 
+        HttpCode: "200"
+      TargetGroupAttributes:
+        - Key: "load_balancing.algorithm.type"
+          Value: "round_robin"
+      VpcId: !Ref MyVpc
+      Name: !Sub "AnnsTG-${AWS::StackName}"
+
+  AnnsALB:
+    Description: An Application load balancer 
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    DependsOn: Installer
+    Properties: 
+      Name: !Sub "AnnsALB-${AWS::StackName}"
+      Type: "application"
+      Scheme: "internet-facing"
+      IpAddressType: "ipv4"
+      Subnets: 
+      - !Ref MyPubSubn1
+      - !Ref MyPubSubn2
+      SecurityGroups: 
+      - !Ref WebSecGrp
+#      - !GetAtt WebSecGrp.GroupId
+
+  MyListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      LoadBalancerArn: !Ref AnnsALB
+      Port: 80
+      Protocol: "HTTP"
+      DefaultActions: 
+        - Order: 1
+          TargetGroupArn: !Ref AnnsTargetGroup
+          Type: "forward"
+
+  Installer: 
     Type: AWS::EC2::Instance
     DependsOn: MyDB
     Properties: 
@@ -211,43 +307,41 @@ Resources:
             # -- efterson db tar lång tid att komma upp sleep 120
             echo "${EfsSystem}:/ /var/www efs _netdev,tls 0 0" | tee -a /etc/fstab
             mount -a
-            mkdir /home/ec2-user/efsMounted-1
+            echo "1 - efsMounted" | tee /home/ec2-user/UserDataLog.txt
             #--- install, start and persist the Apache web server
             yum update -y
             yum install -y httpd
             systemctl start httpd
             systemctl enable httpd
-            mkdir /home/ec2-user/ApacheStarted
+            echo "2 - Apache started" | tee -a /home/ec2-user/UserDataLog.txt
             #--- setup the wordpress initial data only from one server
             #--- ladda ned konifurationsfiler, modifiera för siten och lägg på plats
-            mkdir /home/ec2-user/atPointOfWget-2
+            echo "3 - At point of wget" | tee -a /home/ec2-user/UserDataLog.txt
             cd /home/ec2-user
             wget https://wordpress.org/latest.tar.gz
-            mkdir /home/ec2-user/afterWget-3
+            echo "4 - After wget" | tee -a /home/ec2-user/UserDataLog.txt
             tar -xzf latest.tar.gz
             cd wordpress
             cp wp-config-sample.php wp-config.php
             # MYIP=$(hostname -i)
             sed -i -e "s/database_name_here/wordpress/;s/username_here/${WpUser}/;s/password_here/${WpPw}/;s/localhost/${DbEndPoint}/" wp-config.php
             # sed -i -e "s/database_name_here/wordpress/;s/username_here/lotta/;s/password_here/loTTa123/" wp-config.php
-            mkdir /home/ec2-user/wpConfigFileModified-4
+            echo "5 - WP config file modified" | tee -a /home/ec2-user/UserDataLog.txt
             # here should also replace the security key
             #--- skapa en användare åt wordpress i databasen - GRANT ALL tillåts inte så plockat isär --
-            mkdir /home/ec2-user/atPointOfCreatingWpDbUser-5
-            yum install -y mariadb
-            sleep(120)
+            echo "6 - At point of creating WP db user" | tee -a /home/ec2-user/UserDataLog.txt
+            amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+            # yum install -y mariadb
             MYSQL_HOST=${DbEndPoint}
             Q1="CREATE USER '${WpUser}' IDENTIFIED BY '${WpPw}';"
             Q2="GRANT SELECT,INSERT,DELETE,CREATE,UPDATE,ALTER ON wordpress.* TO '${WpUser}';"
             Q3="FLUSH PRIVILEGES;"
             SQLOP="$Q1$Q2$Q3"
-            echo "$SQLOP" >  /home/ec2-user/sqlstring.txt
-            echo "${DbEndPoint}" >  /home/ec2-user/dbendpoint.tx
-            mkdir /home/ec2-user/priorToDbOp-6
-            mysql --host="${DbEndPoint}" --user="${WpMasterUser}" --password="${WpMasterPw}" -e $SQLOP
-            mkdir /home/ec2-user/atPointOfDeployingWP-7
+            echo "7 - db op sträng: $SQLOP" | tee -a  /home/ec2-user/UserDataLog.txt
+            echo "8 - db endpoint: ${DbEndPoint}" | tee -a  /home/ec2-user/UserDataLog.txt
+            mysql --host="${DbEndPoint}" --user="${WpMasterUser}" --password="${WpMasterPw}" --execute="$SQLOP"
+            echo "9 - At point of deploying WP" | tee -a /home/ec2-user/UserDataLog.txt
             # deploy
-            amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
             cd /home/ec2-user
             cp -r wordpress/* /var/www/html/
             #--- make sure user can fully access files in directory
@@ -255,47 +349,53 @@ Resources:
             chown -R ec2-user:apache /var/www
             chmod 2775 /var/www && find /var/www -type d -exec chmod 2775 {} \;
             systemctl restart httpd
-            mkdir /home/ec2-user/madeItToTheEnd-8
+            echo "10 - Made it to the end" | tee -a /home/ec2-user/UserDataLog.txt
+            echo "Database operation remaining to add the Wordpress user." | tee /home/ec2-user/Readme.txt
+            echo -e "Cut and paste following text and enter it on the in the terminal:\n" | tee -a /home/ec2-user/Readme.txt
+            echo -e "mysql --host="${DbEndPoint}" --user="${WpMasterUser}" --password="${WpMasterPw}" --execute=$SQLOP" | tee -a /home/ec2-user/Readme.txt
             #---cleanup installation files
           - DbEndPoint: !GetAtt MyDB.Endpoint.Address
       Tags:
         - Key: "Name"
-          Value: !Sub "Mounter of efs ${EfsSystem}"
+          Value: !Sub "Installer of WordPress Site"
       SubnetId: !Ref MyPubSubn1
-      KeyName: My3rdKey
+      KeyName: !Ref KeyPairKey
       SecurityGroupIds:
-        - !GetAtt WebServSecGrp.GroupId
+        - !GetAtt DevSecGrp.GroupId
+        - !GetAtt WebAppSecGrp.GroupId
         - !GetAtt EfsBaseSecGrp.GroupId
 
-  Mounter2: 
-    Type: AWS::EC2::Instance
-    DependsOn: Mounter1
-    Properties: 
-      ImageId: 'ami-096f43ef67d75e998'
-      InstanceType: t2.micro
-      UserData: 
-        Fn::Base64:
-          !Sub |
-            #!/bin/bash -x
-            yum update -y
-            yum install amazon-efs-utils -y
-            mkdir -p /var/www
-            echo "${EfsSystem}:/ /var/www efs _netdev,tls 0 0" | tee -a /etc/fstab
-            mount -a
-            #--- add lamp stack
-            yum update -y
-            amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
-            yum install -y httpd mariadb-server
-            systemctl start httpd
-            systemctl enable httpd
-      Tags:
-        - Key: "Name"
-          Value: !Sub "Mounter 2 of efs ${EfsSystem}"
-      SubnetId: !Ref MyPubSubn2
-      KeyName: My3rdKey
-      SecurityGroupIds:
-        - !GetAtt WebServSecGrp.GroupId
+  AnnsLaunchTemplate:
+    Description: A template for the webserver EC2s that displays a welcome page with a name on - specified by parameter 
+                 'NameOnPage', the date and time of creation and a random number 1-10 (just to help tell them apart).
+    Type: 'AWS::EC2::LaunchTemplate'
+    Properties:
+      LaunchTemplateName: !Sub '${AWS::StackName}-launch-template-for-wordpress-server'
+      LaunchTemplateData:
+        ImageId: 'ami-096f43ef67d75e998'
+        InstanceType: t2.micro
+        UserData: 
+          Fn::Base64:
+            !Sub |
+              #!/bin/bash -x
+              yum update -y
+              yum install amazon-efs-utils -y
+              mkdir -p /var/www
+              echo "${EfsSystem}:/ /var/www efs _netdev,tls 0 0" | tee -a /etc/fstab
+              mount -a
+              #--- add lamp stack
+              yum update -y
+              amazon-linux-extras install -y lamp-mariadb10.2-php7.2 php7.2
+              yum install -y httpd mariadb-server
+              systemctl start httpd
+              systemctl enable httpd
+        KeyName: !Ref KeyPairKey
+        SecurityGroupIds: 
+        - !GetAtt DevSecGrp.GroupId
+        - !GetAtt WebAppSecGrp.GroupId
         - !GetAtt EfsBaseSecGrp.GroupId
+        Monitoring: 
+          Enabled: true
 
 Outputs:
 
